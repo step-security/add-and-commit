@@ -1,40 +1,35 @@
 import {parseArgsStringToArgv} from 'string-argv';
 import * as core from '@actions/core';
 import * as YAML from 'js-yaml';
-import {Toolkit} from 'actions-toolkit';
+import {getInput} from './io';
+import {getOctokit} from '@actions/github';
 import * as fs from 'fs';
-import {input, output} from './io';
-
-type RecordOf<T extends string> = Record<T, string | undefined>;
-let tools: Toolkit<RecordOf<input>, RecordOf<output>> | undefined;
-function getToolkit() {
-  if (!tools) {
-    tools = new Toolkit<RecordOf<input>, RecordOf<output>>({
-      secrets: [
-        'GITHUB_EVENT_PATH',
-        'GITHUB_EVENT_NAME',
-        'GITHUB_REF',
-        'GITHUB_ACTOR',
-      ],
-    });
-  }
-
-  return tools;
-}
 
 export async function getUserInfo(username?: string) {
   if (!username) return undefined;
 
-  const res = await getToolkit().github.users.getByUsername({username});
+  try {
+    const token = getInput('github_token');
+    if (!token) {
+      core.warning('No github_token provided, cannot fetch user info');
+      return undefined;
+    }
 
-  core.debug(
-    `Fetched github actor from the API: ${JSON.stringify(res?.data, null, 2)}`,
-  );
+    const octokit = getOctokit(token);
+    const res = await octokit.rest.users.getByUsername({username});
 
-  return {
-    name: res?.data?.name,
-    email: res?.data?.email,
-  };
+    core.debug(
+      `Fetched github actor from the API: ${JSON.stringify(res?.data, null, 2)}`,
+    );
+
+    return {
+      name: res?.data?.name,
+      email: res?.data?.email,
+    };
+  } catch (error) {
+    core.warning(`Failed to fetch user info: ${error}`);
+    return undefined;
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
