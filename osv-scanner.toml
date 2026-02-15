@@ -1,0 +1,7 @@
+[[IgnoredVulns]]
+id = "GHSA-52f5-9888-hmc6"
+reason = "Dev-only dependency via gts linting tool, not used in production code or bundled in dist"
+
+[[IgnoredVulns]]
+id = "GHSA-g9mf-h72j-4rw9"
+reason = "Transitive dependency via @actions/github, action uses official GitHub API wrapper with no direct HTTP requests"
