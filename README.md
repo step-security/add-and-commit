@@ -208,6 +208,8 @@ If you're getting this error and you're using `actions/checkout@v1`, try upgradi
 
 Please note that using `persist-credentials: false` will lead to the same issue.
 
+Please note that using `persist-credentials: false` will lead to the same issue.
+
 ### Performance on large repos
 
 By default, the action will fetch the repository before starting to work on it: this ensures that it can see the already existing refs.  
