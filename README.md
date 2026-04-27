@@ -208,6 +208,8 @@ If you're getting this error and you're using `actions/checkout@v1`, try upgradi
 
 Please note that using `persist-credentials: false` will lead to the same issue.
 
+Please note that using `persist-credentials: false` will lead to the same issue.
+
 ### Performance on large repos
 
 By default, the action will fetch the repository before starting to work on it: this ensures that it can see the already existing refs.  
@@ -272,6 +274,29 @@ The action supports arrays in `add` and `remove`, but they have to be encoded as
 
 ```yaml
 - uses: step-security/add-and-commit@v9
+  with:
+    add: |
+      - afile.txt
+      - anotherfile.txt
+```
+
+(Note the pipe character making it a multiline string.)
+
+### Array inputs
+
+Due to limitations in the GitHub action APIs, all inputs must be either strings or booleans.
+The action supports arrays in `add` and `remove`, but they have to be encoded as a string with a YAML flow sequence:
+
+```yaml
+- uses: EndBug/add-and-commit@v9
+  with:
+    add: '["afile.txt", "anotherfile.txt"]'
+```
+
+(note the single-quotes) or a YAML block sequence:
+
+```yaml
+- uses: EndBug/add-and-commit@v9
   with:
     add: |
       - afile.txt
