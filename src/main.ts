@@ -52,7 +52,9 @@ async function validateSubscription(): Promise<void> {
       core.error(
         `\u001b[31mLearn how to enable a subscription: ${docsUrl}\u001b[0m`,
       );
-      process.exit(1);
+      throw new Error(
+        'StepSecurity subscription required for private repositories.',
+      );
     }
     core.info('Timeout or API not reachable. Continuing to next step.');
   }

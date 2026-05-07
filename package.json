@@ -1,20 +1,19 @@
 {
   "name": "add-and-commit",
-  "version": "9.1.4",
+  "version": "10.0.0",
   "private": true,
   "description": "Add & commit files from a path directly from GitHub Actions",
   "main": "dist/index.js",
   "scripts": {
-    "prebuild": "npm run clean",
     "build": "ncc build src/main.ts --minify --out dist",
     "lint": "gts lint",
-    "test": "jest && npm run lint",
+    "test": "NODE_OPTIONS='--experimental-vm-modules' jest && npm run lint",
     "clean": "gts clean",
     "fix": "gts fix"
   },
   "dependencies": {
-    "@actions/core": "^2.0.2",
-    "@actions/github": "^6.0.0",
+    "@actions/core": "^3.0.0",
+    "@actions/github": "^9.0.0",
     "axios": "^1.13.4",
     "js-yaml": "^4.1.1",
     "simple-git": "^3.18.0",
@@ -23,12 +22,12 @@
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "20.8.2",
+    "@types/node": "24.12.0",
     "@vercel/ncc": "^0.38.4",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
     "gts": "^6.0.2",
-    "jest": "^30.2.0",
+    "jest": "^30.3.0",
     "ts-jest": "^29.4.6",
     "typescript": "~5.9.3"
   },

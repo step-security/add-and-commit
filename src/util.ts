@@ -1,35 +1,32 @@
 import {parseArgsStringToArgv} from 'string-argv';
 import * as core from '@actions/core';
 import * as YAML from 'js-yaml';
-import {getInput} from './io';
 import {getOctokit} from '@actions/github';
 import * as fs from 'fs';
+import {getInput} from './io';
+
+function getOctokitClient() {
+  const token = getInput('github_token');
+  if (!token) {
+    throw new Error('github_token is required');
+  }
+  return getOctokit(token);
+}
 
 export async function getUserInfo(username?: string) {
   if (!username) return undefined;
 
-  try {
-    const token = getInput('github_token');
-    if (!token) {
-      core.warning('No github_token provided, cannot fetch user info');
-      return undefined;
-    }
+  const octokit = getOctokitClient();
+  const res = await octokit.rest.users.getByUsername({username});
 
-    const octokit = getOctokit(token);
-    const res = await octokit.rest.users.getByUsername({username});
+  core.debug(
+    `Fetched github actor from the API: ${JSON.stringify(res?.data, null, 2)}`,
+  );
 
-    core.debug(
-      `Fetched github actor from the API: ${JSON.stringify(res?.data, null, 2)}`,
-    );
-
-    return {
-      name: res?.data?.name,
-      email: res?.data?.email,
-    };
-  } catch (error) {
-    core.warning(`Failed to fetch user info: ${error}`);
-    return undefined;
-  }
+  return {
+    name: res?.data?.name,
+    email: res?.data?.email,
+  };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
