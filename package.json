@@ -13,7 +13,7 @@
     "fix": "gts fix"
   },
   "dependencies": {
-    "@actions/core": "^2.0.2",
+    "@actions/core": "^3.0.0",
     "@actions/github": "^6.0.0",
     "axios": "^1.13.4",
     "js-yaml": "^4.1.1",
