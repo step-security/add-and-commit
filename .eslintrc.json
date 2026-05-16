@@ -1,6 +1,14 @@
 {
   "extends": "./node_modules/gts/",
   "rules": {
-    "n/no-process-exit": "off"
-  }
+    "eol-last": "off"
+  },
+  "overrides": [
+    {
+      "files": ["src/io.ts", "src/main.ts", "src/util.ts"],
+      "rules": {
+        "prettier/prettier": "off"
+      }
+    }
+  ]
 }

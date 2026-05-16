@@ -10,15 +10,13 @@ You can use this GitHub Action to commit changes made in your workflow run direc
 - [Outputs](#outputs)
 - [FAQs](#faqs)
 - [Examples](#examples)
-- [Contributors](#contributors-)
-- [Articles](#articles)
 
 ## Inputs
 
 Add a step like this to your workflow:
 
 ```yaml
-- uses: step-security/add-and-commit@v9 # You can change this to use a specific version.
+- uses: step-security/add-and-commit@v10 # You can change this to use a specific version.
   with:
     # The arguments for the `git add` command (see the paragraph below for more info)
     # Default: '.'
@@ -204,7 +202,7 @@ Some users reported that they were getting an error:
 > fatal: could not read Username for 'https://github.com': No such device or address
 ```
 
-If you're getting this error and you're using `actions/checkout@v1`, try upgrading to `actions/checkout@v2`. If you're still having problems after upgrading, feel free to open an issue.
+If you're getting this error and you're using `actions/checkout@v1`, try upgrading to `actions/checkout@v2`. If you're still having problems after upgrading, feel free to open an issue. Issue ref: [#146](https://github.com/EndBug/add-and-commit/issues/146)
 
 Please note that using `persist-credentials: false` will lead to the same issue.
 
@@ -214,7 +212,7 @@ By default, the action will fetch the repository before starting to work on it: 
 
 When working with a repository that has a lot of branches and tags, fetching it can take a long time. If the fetch step is taking too much time, you can decide to skip it by setting the `fetch` input to `false`: this will prevent the action from running `git fetch` altogether. 
 
-Please note that you have to set up your workflow accordingly: not fetching the repo can impact branch and tag creation within the action, and for this reason it's recommended to disable it only if necessary.
+Please note that you have to set up your workflow accordingly: not fetching the repo can impact branch and tag creation within the action, and for this reason it's recommended to disable it only if necessary. Issue ref: [#386](https://github.com/EndBug/add-and-commit/issues/386)
 
 ## Examples
 
@@ -230,7 +228,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: step-security/add-and-commit@v9
+      - uses: step-security/add-and-commit@v10
         with:
           default_author: github_actions
 ```
@@ -240,7 +238,7 @@ You can also use the `committer_name` and `committer_email` inputs to make it ap
 <img src="https://user-images.githubusercontent.com/26386270/130594168-1d910710-e2d0-4b06-9324-cbe5dde59154.png" height=70/>
 
 ```yaml
-- uses: step-security/add-and-commit@v9
+- uses: step-security/add-and-commit@v10
   with:
     message: Show GitHub Actions logo
     committer_name: GitHub Actions
@@ -250,7 +248,7 @@ You can also use the `committer_name` and `committer_email` inputs to make it ap
 <img src="https://user-images.githubusercontent.com/26386270/130594443-b881fae7-3064-4020-a4cc-6db37ef0df65.png" height=70/>
 
 ```yaml
-- uses: step-security/add-and-commit@v9
+- uses: step-security/add-and-commit@v10
   with:
     message: Show GitHub logo
     committer_name: GitHub Actions
@@ -263,7 +261,7 @@ Due to limitations in the GitHub action APIs, all inputs must be either strings 
 The action supports arrays in `add` and `remove`, but they have to be encoded as a string with a YAML flow sequence:
 
 ```yaml
-- uses: step-security/add-and-commit@v9
+- uses: step-security/add-and-commit@v10
   with:
     add: '["afile.txt", "anotherfile.txt"]'
 ```
@@ -271,7 +269,7 @@ The action supports arrays in `add` and `remove`, but they have to be encoded as
 (note the single-quotes) or a YAML block sequence:
 
 ```yaml
-- uses: step-security/add-and-commit@v9
+- uses: step-security/add-and-commit@v10
   with:
     add: |
       - afile.txt
@@ -306,7 +304,7 @@ jobs:
         run: eslint "src/**" --fix
 
       - name: Commit changes
-        uses: step-security/add-and-commit@v9
+        uses: step-security/add-and-commit@v10
         with:
           author_name: Your Name
           author_email: mail@example.com
@@ -337,7 +335,7 @@ jobs:
       - run: echo "123" > ./pathToRepo/file.txt
 
       # ...and then use the action as you would normally do, but providing the path to the repo
-      - uses: step-security/add-and-commit@v9
+      - uses: step-security/add-and-commit@v10
         with:
           message: 'Add the very useful text file'
           add: '*.txt --force'
