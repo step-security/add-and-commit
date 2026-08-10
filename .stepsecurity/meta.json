@@ -1,0 +1,18 @@
+{
+   "schema_version": "1",
+   "onboarding_type": "copied",
+   "archived": false,
+   "maintained_action_name": "step-security/add-and-commit",
+   "upstream_full_repo_name": "endbug/add-and-commit",
+   "action_type": "node",
+   "last_release": {
+     "tag_name": "v10.0.0",
+     "created_at": "2026-05-16T16:39:40Z",
+     "published_at": "2026-05-18T16:30:59Z"
+   },
+   "sync": {
+     "ignore_presets": [
+       "defaults_v1"
+     ]
+   }
+ }
