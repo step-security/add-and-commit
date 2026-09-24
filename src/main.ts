@@ -1,13 +1,49 @@
 import * as core from '@actions/core';
 import axios, {isAxiosError} from 'axios';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
-import simpleGit, {Response} from 'simple-git';
-import {checkInputs, getInput, logOutputs, setOutput} from './io';
-import {log, matchGitArgs, parseInputArray} from './util';
+import simpleGit, {Response, SimpleGit} from 'simple-git';
+import {
+  checkInputs,
+  getInput,
+  logOutputs,
+  parseBoolOrGitArgs,
+  parsePushAttempts,
+  setOutput,
+} from './io';
+import {
+  assertNoUnexpectedGitlinks,
+  assertWorkingDirectory,
+  findUnexpectedGitlinks,
+  log,
+  matchGitArgs,
+  neutralizeLogString,
+  parseInputArray,
+  pickGitIdentityConfig,
+  resolveBaseDir,
+  safeInfo,
+} from './util';
 
-const baseDir = path.join(process.cwd(), getInput('cwd') || '');
-const git = simpleGit({baseDir});
+const cwdInput = getInput('cwd') || '';
+const baseDir = resolveBaseDir(cwdInput);
+let git!: SimpleGit;
+
+/** Env for git child processes; restricts transports unless opt-out is set. */
+function gitChildEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {...process.env, ...extra};
+  if (!getInput('allow_unsafe_git_protocols', true)) {
+    env.GIT_ALLOW_PROTOCOL = 'https:http:ssh:file:git';
+    env.GIT_PROTOCOL_FROM_USER = '0';
+  }
+  return env;
+}
+
+function parseGitArgs(string: string) {
+  return matchGitArgs(string, {
+    allowUnsafeGitProtocols: getInput('allow_unsafe_git_protocols', true),
+  });
+}
 
 const exitErrors: Error[] = [];
 
@@ -25,6 +61,7 @@ async function validateSubscription(): Promise<void> {
   const docsUrl =
     'https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions';
 
+  /* eslint-disable no-restricted-syntax */
   core.info('');
   core.info('\u001b[1;36mStepSecurity Maintained Action\u001b[0m');
   core.info(`Secure drop-in replacement for ${upstream}`);
@@ -60,40 +97,70 @@ async function validateSubscription(): Promise<void> {
   }
 }
 
-core.info(`Running in ${baseDir}`);
+safeInfo(`Running in ${baseDir}`);
 (async () => {
+  assertWorkingDirectory(baseDir, cwdInput);
+  git = simpleGit({baseDir});
+
   await validateSubscription();
   await checkInputs();
 
+  git.env(gitChildEnv());
+
+  const dryRun = getInput('dry_run', true);
+
   core.startGroup('Internal logs');
-  core.info('> Staging files...');
+  safeInfo(dryRun ? '> Staging files (dry run)...' : '> Staging files...');
 
   const ignoreErrors =
     getInput('pathspec_error_handling') === 'ignore' ? 'pathspec' : 'none';
 
+  let wouldStageChanges = false;
+
   if (getInput('add')) {
-    core.info('> Adding files...');
-    await add(ignoreErrors);
-  } else core.info('> No files to add.');
+    safeInfo(dryRun ? '> Adding files (dry run)...' : '> Adding files...');
+    const addResults = await add(ignoreErrors, dryRun);
+    if (dryRun)
+      wouldStageChanges =
+        wouldStageChanges ||
+        addResults.some(r => typeof r === 'string' && r.trim().length > 0);
+  } else safeInfo('> No files to add.');
 
   if (getInput('remove')) {
-    core.info('> Removing files...');
-    await remove(ignoreErrors);
-  } else core.info('> No files to remove.');
+    safeInfo(dryRun ? '> Removing files (dry run)...' : '> Removing files...');
+    const removeResults = await remove(ignoreErrors, dryRun);
+    if (dryRun)
+      wouldStageChanges =
+        wouldStageChanges ||
+        removeResults.some(r => {
+          if (r === null || r === undefined) return false;
+          const text = typeof r === 'string' ? r : String(r);
+          return text.trim().length > 0;
+        });
+  } else safeInfo('> No files to remove.');
 
-  core.info('> Checking for uncommitted changes in the git working tree...');
+  safeInfo('> Checking for uncommitted changes in the git working tree...');
   const changedFiles = (await git.diffSummary(['--cached'])).files.length;
+  const allowEmpty = parseGitArgs(getInput('commit') || '').includes(
+    '--allow-empty',
+  );
   // continue if there are any changes or if the allow-empty commit argument is included
-  if (
-    changedFiles > 0 ||
-    matchGitArgs(getInput('commit') || '').includes('--allow-empty')
-  ) {
-    core.info(`> Found ${changedFiles} changed files.`);
-    core.debug(
-      `--allow-empty argument detected: ${matchGitArgs(
-        getInput('commit') || '',
-      ).includes('--allow-empty')}`,
+  if (changedFiles > 0 || wouldStageChanges || allowEmpty) {
+    safeInfo(
+      dryRun
+        ? `> Dry run: would proceed (${changedFiles} already staged` +
+            `${wouldStageChanges ? ', staging probes reported changes' : ''}` +
+            `${allowEmpty ? ', --allow-empty' : ''}).`
+        : `> Found ${changedFiles} changed files.`,
     );
+    core.debug(`--allow-empty argument detected: ${allowEmpty}`);
+
+    if (dryRun) {
+      await logDryRunRemainingSteps();
+      core.endGroup();
+      safeInfo('> Dry run completed. No changes were made.');
+      return;
+    }
 
     await git
       .addConfig('user.email', getInput('author_email'), undefined, log)
@@ -102,10 +169,15 @@ core.info(`Running in ${baseDir}`);
       .addConfig('author.name', getInput('author_name'), undefined, log)
       .addConfig('committer.email', getInput('committer_email'), undefined, log)
       .addConfig('committer.name', getInput('committer_name'), undefined, log);
-    core.debug(
-      '> Current git config\n' +
-        JSON.stringify((await git.listConfig()).all, null, 2),
-    );
+    if (core.isDebug()) {
+      const identity = pickGitIdentityConfig((await git.listConfig()).all);
+      core.debug(
+        Object.keys(identity).length
+          ? '> Current git identity config\n' +
+              JSON.stringify(identity, null, 2)
+          : '> Git identity config set (no identity keys present in listConfig)',
+      );
+    }
 
     let fetchOption: string | boolean;
     try {
@@ -114,16 +186,16 @@ core.info(`Running in ${baseDir}`);
       fetchOption = getInput('fetch');
     }
     if (fetchOption) {
-      core.info('> Fetching repo...');
+      safeInfo('> Fetching repo...');
       await git.fetch(
-        matchGitArgs(fetchOption === true ? '' : fetchOption),
+        parseGitArgs(fetchOption === true ? '' : fetchOption),
         log,
       );
-    } else core.info('> Not fetching repo.');
+    } else safeInfo('> Not fetching repo.');
 
     const targetBranch = getInput('new_branch');
     if (targetBranch) {
-      core.info('> Checking-out branch...');
+      safeInfo('> Checking-out branch...');
 
       if (!fetchOption)
         core.warning(
@@ -131,53 +203,40 @@ core.info(`Running in ${baseDir}`);
         );
 
       await git
-        .checkout(targetBranch)
+        .checkout([targetBranch])
         .then(() => {
           log(undefined, `'${targetBranch}' branch already existed.`);
         })
         .catch(() => {
           log(undefined, `Creating '${targetBranch}' branch.`);
-          return git.checkoutLocalBranch(targetBranch, log);
+          return git.checkout(['-b', targetBranch], log);
         });
     }
 
-    const pullOption = getInput('pull');
+    const pullOption = parseBoolOrGitArgs('pull');
     if (pullOption) {
-      core.info('> Pulling from remote...');
-      core.debug(`Current git pull arguments: ${pullOption}`);
-      await git
-        .fetch(undefined, log)
-        .pull(undefined, undefined, matchGitArgs(pullOption), log);
+      await pullFromRemote(pullOption, {restage: true, ignoreErrors});
+    } else safeInfo('> Not pulling from repo.');
 
-      core.info('> Checking for conflicts...');
-      const status = await git.status(undefined, log);
-
-      if (!status.conflicted.length) {
-        core.info('> No conflicts found.');
-        core.info('> Re-staging files...');
-        if (getInput('add')) await add(ignoreErrors);
-        if (getInput('remove')) await remove(ignoreErrors);
-      } else
-        throw new Error(
-          `There are ${
-            status.conflicted.length
-          } conflicting files: ${status.conflicted.join(', ')}`,
-        );
-    } else core.info('> Not pulling from repo.');
-
-    core.info('> Creating commit...');
-    await git
-      .commit(getInput('message'), matchGitArgs(getInput('commit') || ''))
-      .then(async data => {
-        log(undefined, data);
-        setOutput('committed', 'true');
-        setOutput('commit_long_sha', data.commit);
-        setOutput('commit_sha', data.commit.substring(0, 7));
-      })
-      .catch(err => core.setFailed(err));
+    safeInfo('> Creating commit...');
+    const data = await git.commit(
+      getInput('message'),
+      parseGitArgs(getInput('commit') || ''),
+    );
+    log(undefined, data);
+    // simple-git can resolve with an empty SHA when no commit was created
+    // (e.g. nothing left to commit). Do not report a false success.
+    if (!data.commit) {
+      throw new Error(
+        'Commit did not produce a SHA; refusing to report committed=true.',
+      );
+    }
+    setOutput('committed', 'true');
+    setOutput('commit_long_sha', data.commit);
+    setOutput('commit_sha', data.commit.substring(0, 7));
 
     if (getInput('tag')) {
-      core.info('> Tagging commit...');
+      safeInfo('> Tagging commit...');
 
       if (!fetchOption)
         core.warning(
@@ -185,7 +244,7 @@ core.info(`Running in ${baseDir}`);
         );
 
       await git
-        .tag(matchGitArgs(getInput('tag') || ''), (err, data?) => {
+        .tag(parseGitArgs(getInput('tag') || ''), (err, data?) => {
           if (data) setOutput('tagged', 'true');
           return log(err, data);
         })
@@ -194,7 +253,7 @@ core.info(`Running in ${baseDir}`);
           return log(null, data);
         })
         .catch(err => core.setFailed(err));
-    } else core.info('> No tag info provided.');
+    } else safeInfo('> No tag info provided.');
 
     let pushOption: string | boolean;
     try {
@@ -203,55 +262,60 @@ core.info(`Running in ${baseDir}`);
       pushOption = getInput('push');
     }
     if (pushOption) {
-      // If the options is `true | string`...
-      core.info('> Pushing commit to repo...');
+      const pushAttempts = parsePushAttempts(getInput('push_attempts') || '1');
 
-      if (pushOption === true) {
-        core.debug(
-          `Running: git push origin ${
-            getInput('new_branch') || ''
-          } --set-upstream`,
-        );
-        await git.push(
-          'origin',
-          getInput('new_branch'),
-          {'--set-upstream': null},
-          (err, data?) => {
-            if (data) setOutput('pushed', 'true');
-            return log(err, data);
-          },
-        );
-      } else {
-        core.debug(`Running: git push ${pushOption}`);
-        await git.push(
-          undefined,
-          undefined,
-          matchGitArgs(pushOption),
-          (err, data?) => {
-            if (data) setOutput('pushed', 'true');
-            return log(err, data);
-          },
-        );
+      for (let attempt = 1; attempt <= pushAttempts; attempt++) {
+        try {
+          safeInfo(
+            pushAttempts > 1
+              ? `> Pushing commit to repo (attempt ${attempt}/${pushAttempts})...`
+              : '> Pushing commit to repo...',
+          );
+          await pushCommit(pushOption);
+          break;
+        } catch (err) {
+          if (attempt === pushAttempts) throw err;
+
+          const message = err instanceof Error ? err.message : String(err);
+          core.warning(
+            `Push failed (attempt ${attempt}/${pushAttempts}): ${neutralizeLogString(message)}`,
+          );
+
+          if (pullOption) {
+            await pullFromRemote(pullOption, {
+              restage: false,
+              ignoreErrors,
+            });
+            // Rebase rewrites the commit; refresh outputs from HEAD.
+            const head = (await git.revparse(['HEAD'])).trim();
+            setOutput('commit_long_sha', head);
+            setOutput('commit_sha', head.substring(0, 7));
+          }
+        }
       }
 
       if (getInput('tag')) {
-        core.info('> Pushing tags to repo...');
+        safeInfo('> Pushing tags to repo...');
 
         await git
-          .pushTags('origin', matchGitArgs(getInput('tag_push') || ''))
+          .pushTags('origin', parseGitArgs(getInput('tag_push') || ''))
           .then(data => {
             setOutput('tag_pushed', 'true');
             return log(null, data);
           })
           .catch(err => core.setFailed(err));
-      } else core.info('> No tags to push.');
-    } else core.info('> Not pushing anything.');
+      } else safeInfo('> No tags to push.');
+    } else safeInfo('> Not pushing anything.');
 
     core.endGroup();
-    core.info('> Task completed.');
+    safeInfo('> Task completed.');
   } else {
     core.endGroup();
-    core.info('> Working tree clean. Nothing to commit.');
+    safeInfo(
+      dryRun
+        ? '> Dry run: working tree clean. Nothing would be committed.'
+        : '> Working tree clean. Nothing to commit.',
+    );
   }
 })()
   .then(() => {
@@ -269,7 +333,174 @@ core.info(`Running in ${baseDir}`);
     core.setFailed(e);
   });
 
-async function add(ignoreErrors: 'all' | 'pathspec' | 'none' = 'none') {
+async function logDryRunRemainingSteps() {
+  safeInfo(
+    `> Would set git identity: ${getInput('author_name')} <${getInput(
+      'author_email',
+    )}> (committer: ${getInput('committer_name')} <${getInput(
+      'committer_email',
+    )}>)`,
+  );
+
+  let fetchOption: string | boolean;
+  try {
+    fetchOption = getInput('fetch', true);
+  } catch {
+    fetchOption = getInput('fetch');
+  }
+  if (fetchOption) {
+    safeInfo(
+      `> Would fetch repo${
+        fetchOption === true ? '' : ` with: ${fetchOption}`
+      }.`,
+    );
+  } else safeInfo('> Would not fetch repo.');
+
+  const targetBranch = getInput('new_branch');
+  if (targetBranch) {
+    safeInfo(`> Would check out branch '${targetBranch}'.`);
+    if (!fetchOption)
+      core.warning(
+        'Creating a new branch without fetching the repo first could result in an error when pushing to GitHub. Refer to the action README for more info about this topic.',
+      );
+  }
+
+  const pullOption = parseBoolOrGitArgs('pull');
+  if (pullOption) {
+    safeInfo(
+      `> Would pull from remote${
+        pullOption === true ? '' : ` with: ${pullOption}`
+      }.`,
+    );
+  } else safeInfo('> Would not pull from repo.');
+
+  safeInfo(
+    `> Would create commit with message: "${getInput('message')}"${
+      getInput('commit') ? ` (extra args: ${getInput('commit')})` : ''
+    }.`,
+  );
+
+  if (getInput('tag')) {
+    safeInfo(`> Would tag commit with: ${getInput('tag')}.`);
+    if (!fetchOption)
+      core.warning(
+        'Creating a tag without fetching the repo first could result in an error when pushing to GitHub. Refer to the action README for more info about this topic.',
+      );
+  } else safeInfo('> No tag info provided.');
+
+  let pushOption: string | boolean;
+  try {
+    pushOption = getInput('push', true);
+  } catch {
+    pushOption = getInput('push');
+  }
+  if (pushOption) {
+    const pushAttempts = parsePushAttempts(getInput('push_attempts') || '1');
+    if (pushOption === true) {
+      const branch = getInput('new_branch');
+      safeInfo(
+        branch
+          ? `> Would push commit to repo (set upstream for '${branch}')${
+              pushAttempts > 1 ? ` with up to ${pushAttempts} attempts` : ''
+            }.`
+          : `> Would push commit to repo${
+              pushAttempts > 1 ? ` with up to ${pushAttempts} attempts` : ''
+            }.`,
+      );
+    } else
+      safeInfo(
+        `> Would push commit to repo with: ${pushOption}${
+          pushAttempts > 1 ? ` (up to ${pushAttempts} attempts)` : ''
+        }.`,
+      );
+
+    if (getInput('tag')) {
+      safeInfo(
+        `> Would push tags to repo${
+          getInput('tag_push') ? ` with: ${getInput('tag_push')}` : ''
+        }.`,
+      );
+    } else safeInfo('> No tags to push.');
+  } else safeInfo('> Would not push anything.');
+}
+
+async function pullFromRemote(
+  pullOption: true | string,
+  options: {
+    restage: boolean;
+    ignoreErrors: 'all' | 'pathspec' | 'none';
+  },
+) {
+  safeInfo('> Pulling from remote...');
+  const args = pullOption === true ? '' : pullOption;
+  core.debug(`Current git pull arguments: ${args}`);
+  await git
+    .fetch(undefined, log)
+    .pull(undefined, undefined, parseGitArgs(args), log);
+
+  safeInfo('> Checking for conflicts...');
+  const status = await git.status(undefined, log);
+
+  if (status.conflicted.length) {
+    throw new Error(
+      `There are ${
+        status.conflicted.length
+      } conflicting files: ${status.conflicted
+        .map(neutralizeLogString)
+        .join(', ')}`,
+    );
+  }
+
+  safeInfo('> No conflicts found.');
+  if (options.restage) {
+    safeInfo('> Re-staging files...');
+    if (getInput('add')) await add(options.ignoreErrors);
+    if (getInput('remove')) await remove(options.ignoreErrors);
+  }
+}
+
+async function pushCommit(pushOption: true | string) {
+  if (pushOption === true) {
+    const branch = getInput('new_branch');
+    if (branch) {
+      core.debug(`Running: git push --set-upstream origin -- ${branch}`);
+      await git.raw(
+        ['push', '--set-upstream', 'origin', '--', branch],
+        (err, data?) => {
+          if (data) setOutput('pushed', 'true');
+          return log(err, data);
+        },
+      );
+    } else {
+      core.debug('Running: git push origin --set-upstream');
+      await git.push(
+        'origin',
+        undefined,
+        {'--set-upstream': null},
+        (err, data?) => {
+          if (data) setOutput('pushed', 'true');
+          return log(err, data);
+        },
+      );
+    }
+  } else {
+    core.debug(`Running: git push ${pushOption}`);
+    await git.push(
+      undefined,
+      undefined,
+      parseGitArgs(pushOption),
+      (err, data?) => {
+        if (data) setOutput('pushed', 'true');
+        return log(err, data);
+      },
+    );
+  }
+}
+
+async function add(
+  ignoreErrors: 'all' | 'pathspec' | 'none' = 'none',
+  dryRun = false,
+) {
   const input = getInput('add');
   if (!input) return [];
 
@@ -277,11 +508,14 @@ async function add(ignoreErrors: 'all' | 'pathspec' | 'none' = 'none') {
   const res: (string | void)[] = [];
 
   for (const args of parsed) {
+    const gitArgs = dryRun
+      ? ['--dry-run', ...parseGitArgs(args)]
+      : parseGitArgs(args);
     res.push(
       // Push the result of every git command (which are executed in order) to the array
       // If any of them fails, the whole function will return a Promise rejection
       await git
-        .add(matchGitArgs(args), (err, data) =>
+        .add(gitArgs, (err, data) =>
           log(ignoreErrors === 'all' ? null : err, data),
         )
         .catch((e: Error) => {
@@ -297,7 +531,7 @@ async function add(ignoreErrors: 'all' | 'pathspec' | 'none' = 'none') {
 
             const peh = getInput('pathspec_error_handling'),
               err = new Error(
-                `Add command did not match any file: git add ${args}`,
+                `Add command did not match any file: git add ${neutralizeLogString(args)}`,
               );
             if (peh === 'exitImmediately') throw err;
             if (peh === 'exitAtEnd') exitErrors.push(err);
@@ -306,26 +540,111 @@ async function add(ignoreErrors: 'all' | 'pathspec' | 'none' = 'none') {
     );
   }
 
+  if (dryRun) {
+    await assertGitlinksWithTempIndex(parsed, ignoreErrors);
+  } else {
+    const cachedRaw = await git.raw(['diff', '--cached', '--raw']);
+    assertNoUnexpectedGitlinks(findUnexpectedGitlinks(cachedRaw));
+  }
+
   return res;
+}
+
+/**
+ * Stages `add` pathspecs into an isolated temporary index and rejects unexpected
+ * gitlinks, without touching the repository's real index.
+ */
+async function assertGitlinksWithTempIndex(
+  addArgGroups: string[],
+  ignoreErrors: 'all' | 'pathspec' | 'none',
+) {
+  const tmpIndex = path.join(
+    os.tmpdir(),
+    `add-and-commit-${process.pid}-${Date.now()}.index`,
+  );
+
+  try {
+    const indexPathRaw = (
+      await git.raw(['rev-parse', '--git-path', 'index'])
+    ).trim();
+    const indexPath = path.isAbsolute(indexPathRaw)
+      ? indexPathRaw
+      : path.join(baseDir, indexPathRaw);
+
+    if (fs.existsSync(indexPath)) {
+      fs.copyFileSync(indexPath, tmpIndex);
+    } else {
+      const gitSeed = simpleGit({baseDir}).env(
+        gitChildEnv({GIT_INDEX_FILE: tmpIndex}),
+      );
+      const headResolves = await git
+        .raw(['rev-parse', '--verify', 'HEAD'])
+        .then(() => true)
+        .catch(() => false);
+      if (headResolves) {
+        await gitSeed.raw(['read-tree', 'HEAD']);
+      } else {
+        await gitSeed.raw(['read-tree', '--empty']);
+      }
+    }
+
+    const gitTmp = simpleGit({baseDir}).env(
+      gitChildEnv({GIT_INDEX_FILE: tmpIndex}),
+    );
+
+    for (const args of addArgGroups) {
+      await gitTmp
+        .add(parseGitArgs(args), (err, data) =>
+          log(ignoreErrors === 'all' ? null : err, data),
+        )
+        .catch((e: Error) => {
+          if (ignoreErrors === 'all') return;
+
+          if (
+            e.message.includes('fatal: pathspec') &&
+            e.message.includes('did not match any files')
+          ) {
+            // Pathspec outcomes were already handled by the dry-run add probes.
+            if (ignoreErrors === 'pathspec') return;
+            const peh = getInput('pathspec_error_handling');
+            if (peh === 'exitImmediately') {
+              throw new Error(
+                `Add command did not match any file: git add ${neutralizeLogString(args)}`,
+              );
+            }
+            return;
+          }
+          throw e;
+        });
+    }
+
+    const cachedRaw = await gitTmp.raw(['diff', '--cached', '--raw']);
+    assertNoUnexpectedGitlinks(findUnexpectedGitlinks(cachedRaw));
+  } finally {
+    fs.rmSync(tmpIndex, {force: true});
+    fs.rmSync(`${tmpIndex}.lock`, {force: true});
+  }
 }
 
 async function remove(
   ignoreErrors: 'all' | 'pathspec' | 'none' = 'none',
-): Promise<(void | Response<void>)[]> {
+  dryRun = false,
+): Promise<(void | Response<void> | string)[]> {
   const input = getInput('remove');
   if (!input) return [];
 
   const parsed = parseInputArray(input);
-  const res: (void | Response<void>)[] = [];
+  const res: (void | Response<void> | string)[] = [];
 
   for (const args of parsed) {
+    const gitArgs = dryRun
+      ? ['--dry-run', ...parseGitArgs(args)]
+      : parseGitArgs(args);
     res.push(
       // Push the result of every git command (which are executed in order) to the array
       // If any of them fails, the whole function will return a Promise rejection
       await git
-        .rm(matchGitArgs(args), (e, d) =>
-          log(ignoreErrors === 'all' ? null : e, d),
-        )
+        .rm(gitArgs, (e, d) => log(ignoreErrors === 'all' ? null : e, d))
         .catch((e: Error) => {
           // if I should ignore every error, return
           if (ignoreErrors === 'all') return;
@@ -339,7 +658,7 @@ async function remove(
 
             const peh = getInput('pathspec_error_handling'),
               err = new Error(
-                `Remove command did not match any file:\n  git rm ${args}`,
+                `Remove command did not match any file:\n  git rm ${neutralizeLogString(args)}`,
               );
             if (peh === 'exitImmediately') throw err;
             if (peh === 'exitAtEnd') exitErrors.push(err);

@@ -1,8 +1,15 @@
 import * as core from '@actions/core';
-import {getUserInfo, parseInputArray} from './util';
+import {
+  assertValidBranchName,
+  getUserInfo,
+  neutralizeLogString,
+  parseInputArray,
+  safeInfo,
+} from './util';
 
 export interface InputTypes {
   add: string;
+  allow_unsafe_git_protocols: boolean;
   author_name: string;
   author_email: string;
   commit: string | undefined;
@@ -10,12 +17,14 @@ export interface InputTypes {
   committer_email: string;
   cwd: string;
   default_author: 'github_actor' | 'user_info' | 'github_actions';
+  dry_run: boolean;
   fetch: string;
   message: string;
   new_branch: string | undefined;
   pathspec_error_handling: 'ignore' | 'exitImmediately' | 'exitAtEnd';
   pull: string | undefined;
   push: string;
+  push_attempts: string;
   remove: string | undefined;
   tag: string | undefined;
   tag_push: string | undefined;
@@ -64,10 +73,44 @@ export function setOutput<T extends output>(name: T, value: OutputTypes[T]) {
   core.setOutput(name, value);
 }
 
+/**
+ * Parses an input that can be a boolean (`true`/`false`) or a git-args string.
+ * Empty / unset values are returned as an empty string (falsy).
+ */
+export function parseBoolOrGitArgs(
+  name: 'fetch' | 'push' | 'pull',
+): string | boolean {
+  try {
+    return getInput(name, true);
+  } catch {
+    return getInput(name) || '';
+  }
+}
+
+/**
+ * Parses `push_attempts` as a positive integer (≥ 1).
+ * Accepts only base-10 integer strings (optional leading `+`).
+ */
+export function parsePushAttempts(value: string): number {
+  const trimmed = value.trim();
+  if (!/^\+?\d+$/.test(trimmed)) {
+    throw new Error(
+      `'${neutralizeLogString(value)}' is not a valid value for push_attempts. It must be a positive integer (≥ 1).`,
+    );
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(
+      `'${neutralizeLogString(value)}' is not a valid value for push_attempts. It must be a positive integer (≥ 1).`,
+    );
+  }
+  return parsed;
+}
+
 export function logOutputs() {
   core.startGroup('Outputs');
   for (const key in outputs) {
-    core.info(`${key}: ${outputs[key as keyof OutputTypes]}`);
+    safeInfo(`${key}: ${outputs[key as keyof OutputTypes]}`);
   }
   core.endGroup();
 }
@@ -91,11 +134,9 @@ export async function checkInputs() {
   if (getInput('add')) {
     const parsed = parseInputArray(getInput('add'));
     if (parsed.length === 1)
-      core.info(
-        'Add input parsed as single string, running 1 git add command.',
-      );
+      safeInfo('Add input parsed as single string, running 1 git add command.');
     else if (parsed.length > 1)
-      core.info(
+      safeInfo(
         `Add input parsed as string array, running ${parsed.length} git add commands.`,
       );
     else core.setFailed('Add input: array length < 1');
@@ -103,11 +144,11 @@ export async function checkInputs() {
   if (getInput('remove')) {
     const parsed = parseInputArray(getInput('remove') || '');
     if (parsed.length === 1)
-      core.info(
+      safeInfo(
         'Remove input parsed as single string, running 1 git rm command.',
       );
     else if (parsed.length > 1)
-      core.info(
+      safeInfo(
         `Remove input parsed as string array, running ${parsed.length} git rm commands.`,
       );
     else core.setFailed('Remove input: array length < 1');
@@ -118,11 +159,25 @@ export async function checkInputs() {
   const default_author_valid = ['github_actor', 'user_info', 'github_actions'];
   if (!default_author_valid.includes(getInput('default_author')))
     throw new Error(
-      `'${getInput(
-        'default_author',
+      `'${neutralizeLogString(
+        getInput('default_author'),
       )}' is not a valid value for default_author. Valid values: ${default_author_valid.join(
         ', ',
       )}`,
+    );
+  // #endregion
+
+  // #region dry_run
+  if (getInput('dry_run', true))
+    safeInfo(
+      '> Dry run enabled: no mutating git operations will be performed.',
+    );
+  // #endregion
+
+  // #region allow_unsafe_git_protocols
+  if (getInput('allow_unsafe_git_protocols', true))
+    core.warning(
+      'allow_unsafe_git_protocols is enabled: transport allowlist and scheme:: remote-helper URL checks are disabled. Only use this with fully trusted git argument inputs.',
     );
   // #endregion
 
@@ -186,7 +241,7 @@ export async function checkInputs() {
 
   setDefault('author_name', name);
   setDefault('author_email', email);
-  core.info(
+  safeInfo(
     `> Using '${getInput('author_name')} <${getInput(
       'author_email',
     )}>' as author.`,
@@ -195,7 +250,7 @@ export async function checkInputs() {
 
   // #region committer_name, committer_email
   if (getInput('committer_name') || getInput('committer_email'))
-    core.info(
+    safeInfo(
       `> Using custom committer info: ${
         getInput('committer_name') ||
         getInput('author_name') + ' [from author info]'
@@ -217,15 +272,20 @@ export async function checkInputs() {
     'message',
     `Commit from GitHub Actions (${process.env.GITHUB_WORKFLOW})`,
   );
-  core.info(`> Using "${getInput('message')}" as commit message.`);
+  safeInfo(`> Using "${getInput('message')}" as commit message.`);
+  // #endregion
+
+  // #region new_branch
+  const newBranch = getInput('new_branch');
+  if (newBranch) assertValidBranchName(newBranch);
   // #endregion
 
   // #region pathspec_error_handling
   const peh_valid = ['ignore', 'exitImmediately', 'exitAtEnd'];
   if (!peh_valid.includes(getInput('pathspec_error_handling')))
     throw new Error(
-      `"${getInput(
-        'pathspec_error_handling',
+      `"${neutralizeLogString(
+        getInput('pathspec_error_handling'),
       )}" is not a valid value for the 'pathspec_error_handling' input. Valid values are: ${peh_valid.join(
         ', ',
       )}`,
@@ -237,6 +297,13 @@ export async function checkInputs() {
     core.warning(
       "`NO-PULL` is a legacy option for the `pull` input. If you don't want the action to pull the repo, simply remove this input.",
     );
+
+  const pullOption = parseBoolOrGitArgs('pull');
+  if (getInput('pull')) {
+    core.debug(
+      `Current pull option: '${pullOption}' (parsed as ${typeof pullOption})`,
+    );
+  }
   // #endregion
 
   // #region push
@@ -251,6 +318,16 @@ export async function checkInputs() {
     }
 
     core.debug(`Current push option: '${value}' (parsed as ${typeof value})`);
+  }
+  // #endregion
+
+  // #region push_attempts
+  const pushAttempts = parsePushAttempts(getInput('push_attempts') || '1');
+  core.debug(`Current push_attempts option: ${pushAttempts}`);
+  if (pushAttempts > 1 && !pullOption) {
+    core.warning(
+      'push_attempts is greater than 1 but pull is not set. Retries will re-run push only; without pull (e.g. --rebase), concurrent remote updates are unlikely to recover.',
+    );
   }
   // #endregion
 
