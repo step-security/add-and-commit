@@ -43,6 +43,8 @@ Add a step like this to your workflow:
     committer_email: mail@example.com
 
     # The local path to the directory where your repository is located. You should use actions/checkout first to set it up.
+    # Relative to the runner workspace, or an absolute path (e.g. ${{ github.workspace }}/path).
+    # Note: $GITHUB_WORKSPACE is not expanded in with: — use ${{ github.workspace }} instead.
     # Default: '.'
     cwd: './path/to/the/repo'
 
@@ -52,6 +54,16 @@ Add a step like this to your workflow:
     # - github_actions -> github-actions <email associated with the github logo>
     # Default: github_actor
     default_author: github_actor
+
+    # If true, validate inputs and report what would happen without mutating the repo
+    # (no real add/rm/commit/tag/push/pull/fetch/checkout/config). Useful for tinkering.
+    # Default: false
+    dry_run: true
+
+    # If true, allow custom git transports / scheme:: remote-helper URLs in argument inputs.
+    # Keep false unless you need a custom remote helper and fully trust those inputs.
+    # Default: false
+    allow_unsafe_git_protocols: false
 
     # Arguments for the git fetch command. If set to false, the action won't fetch the repo.
     # For more info as to why fetching is usually recommended, please see the "Performance on large repos" FAQ. 
@@ -73,13 +85,19 @@ Add a step like this to your workflow:
     # Default: ignore
     pathspec_error_handling: ignore
 
-    # Arguments for the git pull command. By default, the action does not pull.
+    # Whether to pull from the remote. Set to true to run git pull with no extra
+    # args, false (or omit) to skip, or a string for git pull arguments
+    # (e.g. '--rebase --autostash').
     # Default: ''
-    pull: '--rebase --autostash ...'
+    pull: true
 
     # Whether to push the commit and, if any, its tags to the repo. It can also be used to set the git push arguments (see the paragraph below for more info)
     # Default: true
     push: false
+
+    # Max times to try pushing. If pull is set, the action re-pulls between failed attempts.
+    # Default: 1
+    push_attempts: 3
 
     # The arguments for the `git rm` command (see the paragraph below for more info)
     # Default: ''
@@ -99,10 +117,20 @@ Add a step like this to your workflow:
 Multiple options let you provide the `git` arguments that you want the action to use. It's important to note that these arguments **are not actually used with a CLI command**, but they are parsed by a package called [`string-argv`](https://npm.im/string-argv), and then used with [`simple-git`](https://npm.im/simple-git).  
 What does this mean for you? It means that strings that contain a lot of nested quotes may be parsed incorrectly, and that specific ways of declaring arguments may not be supported by these libraries. If you're having issues with your argument strings you can check whether they're being parsed correctly either by [enabling debug logging](https://docs.github.com/en/actions/managing-workflow-runs/enabling-debug-logging) for your workflow runs or by testing it directly with `string-argv` ([RunKit demo](https://npm.runkit.com/string-argv)): if each argument and option is parsed correctly you'll see an array where every string is an option or value.
 
-Remote-helper overrides (`--upload-pack`, `--receive-pack`, `--exec`, and abbreviations of those) are rejected: they can make git run an arbitrary Git transport program during fetch/pull/push.  
+Remote-helper overrides (`--upload-pack`, `--receive-pack`, `--exec`, and abbreviations of those) are rejected on every token, including values after `-u` / `-m`: they can make git run an arbitrary Git transport program during fetch/pull/push.  
+Remote-helper URL forms (`ext::…` and other `scheme::` tokens) are rejected for the same reason.  
+Git child processes are also limited to the `https`, `http`, `ssh`, `file`, and `git` transports (`GIT_ALLOW_PROTOCOL`) unless you set [`allow_unsafe_git_protocols`](#allow-unsafe-git-protocols) to `true` (only for trusted custom remotes/helpers).  
 Message-from-file flags (`-F`, `--file`, abbreviations such as `--fi`, and short-option clusters that include `F` such as `-aF`) are rejected: they can embed arbitrary runner filesystem contents into a tag or commit message and, with a push, into the repository history.  
+Pathspec-from-file flags (`--pathspec-from-file`, `--pathspec-file-nul`, and abbreviations such as `--pathspec-fr` / `--pathspec-fi`) are rejected on `add`, `remove`, and `commit`: they can read an arbitrary runner file and leak its contents into the action log.  
 Unmatched `'` / `"` quotes are also rejected: `string-argv` can otherwise split on an odd quote and turn part of a value into extra flags (for example a branch name like `fix'--force` becoming `fix` plus `--force`).  
-Do not interpolate untrusted data (for example values from `github.event.*`, `github.head_ref`, or repository content that contributors can edit) into `fetch`, `pull`, `push`, `tag`, `tag_push`, or `commit` without sanitizing them first. When the branch name is dynamic, prefer the default `push: true` with [`new_branch`](#creating-a-new-branch) instead of embedding the ref in a custom `push` string.
+A quoted segment is accepted only when its closing quote is followed by whitespace or the end of the input. That is a conservative argument-boundary check, not a claim that every rejected form would become extra argv words: `'main'--force` is rejected (and would split into `main` plus `--force`), and so is `a'b'c` (which `string-argv` would keep as one token). `--message='hello'` is allowed because the closer is at the end of the word. Put a space after a wrapping closer (`origin 'main' --force`) or omit the quotes.
+
+> [!WARNING]
+> Do not interpolate untrusted data (for example values from `github.event.*`, `github.head_ref`, or repository content that contributors can edit) into `fetch`, `pull`, `push`, `tag`, `tag_push`, or `commit` without sanitizing them first. When the branch name is dynamic, prefer the default `push: true` with [`new_branch`](#creating-a-new-branch) instead of embedding the ref in a custom `push` string.
+
+### Allow unsafe git protocols
+
+Set `allow_unsafe_git_protocols: true` only if you need a custom remote helper or a transport outside the default allowlist (`https`, `http`, `ssh`, `file`, `git`). This disables both the `GIT_ALLOW_PROTOCOL` restriction and the rejection of `scheme::` tokens in git argument inputs. It does **not** re-enable blocked options such as `--upload-pack`, `-F`/`--file`, or `--pathspec-from-file`/`--pathspec-file-nul`. Treat this like a break-glass setting: only enable it with fully trusted, non-interpolated argument strings.
 
 ### Adding files
 
@@ -129,6 +157,14 @@ By default the action runs the following command: `git push origin ${new_branch 
 
 One way to use this is if you want to force push to a trusted/static branch name in your repo: set the `push` input to, for example, `origin yourBranch --force`. Do not build that string from untrusted refs such as `github.head_ref`.
 
+If multiple jobs may push to the same branch (for example a matrix), set `push_attempts` to try the push more than once. When `pull` is set (`true` for a default `git pull`, or a string such as `--rebase --autostash`), each failed attempt re-runs that pull before pushing again, so a commit that lost a race can catch up to the remote tip. Without `pull`, retries only re-run push. The default is `1` (no retries). A typical concurrent setup looks like:
+
+```yaml
+with:
+  pull: '--rebase --autostash'
+  push_attempts: 3
+```
+
 ### Creating a new branch
 
 If you want the action to commit in a new branch, you can use the `new_branch` input. This must be a valid git branch name (not raw git arguments): it cannot be empty, start with `-`, contain whitespace/control characters, or fail `git check-ref-format --branch` (for example `feature..name`, `name@{x}`, `name~1`, or a name ending with `.`).
@@ -148,6 +184,11 @@ If you want to commit files "across different branches", here are two ways to do
 You can use the `tag` option to enter the arguments for a `git tag` command. In order for the action to isolate the tag name from the rest of the arguments, it should be the first word not preceded by an hyphen (e.g. `-a tag-name -m "some other stuff"` is ok).  
 You can also change the arguments of the push command for tags: every argument in the `tag_push` input will be appended to the `git push --tags` command.  
 For more info on how git arguments are parsed, see [the "Git arguments" section](#git-arguments).
+
+### Dry run
+
+Set `dry_run: true` if you want the action to validate your inputs and log what it would do, without changing the repository. Staging uses `git add --dry-run` / `git rm --dry-run`; commit, tag, push, pull, fetch, checkout, and git identity config are only reported in the logs.  
+Outputs stay at their defaults (`committed`/`pushed`/`tagged`/`tag_pushed` are `'false'`, and commit SHAs are empty) because nothing was actually created.
 
 ## Outputs
 

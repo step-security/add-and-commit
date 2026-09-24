@@ -29,6 +29,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Verify dist/ matches source
+        id: verify-dist
+        run: |
+          if [ "$(git diff --ignore-space-at-eol --text -- dist/ | wc -l)" -gt "0" ] \
+            || [ -n "$(git ls-files --others --exclude-standard -- dist/)" ]; then
+            echo "Committed dist/ is out of sync with src/. Run npm ci && npm run build and commit dist/."
+            git diff --ignore-space-at-eol --text -- dist/
+            git ls-files --others --exclude-standard -- dist/
+            exit 1
+          fi
 
   test:
     permissions:

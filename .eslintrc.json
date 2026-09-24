@@ -1,7 +1,14 @@
 {
   "extends": "./node_modules/gts/",
   "rules": {
-    "eol-last": "off"
+    "eol-last": "off",
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "CallExpression[callee.object.name='core'][callee.property.name='info']",
+        "message": "Use safeInfo() so user-controlled strings are neutralized before stdout."
+      }
+    ]
   },
   "overrides": [
     {
